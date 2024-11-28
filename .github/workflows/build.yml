@@ -1,0 +1,156 @@
+name: Build Sing-Box
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build Sing-Box
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          # Linux
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: linux
+            goarch: arm
+            goarm: 7
+          - goos: linux
+            goarch: mips64
+          - goos: linux
+            goarch: mips64le
+          
+          # macOS
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+          
+          # Windows
+          - goos: windows
+            goarch: amd64
+          - goos: windows
+            goarch: arm64
+          
+          # BSD
+          - goos: freebsd
+            goarch: amd64
+          - goos: openbsd
+            goarch: amd64
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: stable
+        cache: false
+
+    - name: Get version
+      id: get_version
+      run: |
+        VERSION=$(git describe --tags --always)
+        echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+
+    - name: Build
+      env:
+        GOOS: ${{ matrix.goos }}
+        GOARCH: ${{ matrix.goarch }}
+        GOARM: ${{ matrix.goarm }}
+      run: |
+        TAGS="with_quic,with_wireguard,with_ech,with_utls,with_clash_api,with_gvisor,with_shadowsocksr,with_shadowtls,with_v2ray_api,with_acme,with_reality_server,with_reality_client,with_dhcp,with_grpc"
+        
+        # Prepare output directory
+        OUTPUT_NAME="sing-box_${{ steps.get_version.outputs.VERSION }}_${{ matrix.goos }}_${{ matrix.goarch }}"
+        mkdir -p "dist/${OUTPUT_NAME}"
+        
+        # Set output filename (with .exe for Windows)
+        OUTPUT_FILE="sing-box$([[ "${{ matrix.goos }}" == "windows" ]] && echo .exe || echo '')"
+        
+        # Build command
+        go build -v \
+          -o "dist/${OUTPUT_NAME}/${OUTPUT_FILE}" \
+          -trimpath \
+          -tags "${TAGS}" \
+          -ldflags "-X 'github.com/sagernet/sing-box/constant.Version=${{ steps.get_version.outputs.VERSION }}' -s -w" \
+          ./cmd/sing-box
+        
+        # Create README
+        cat > "dist/${OUTPUT_NAME}/README.md" << EOF
+        # Sing-Box ${{ steps.get_version.outputs.VERSION }}
+        
+        ## Build Information
+        - OS: ${{ matrix.goos }}
+        - Architecture: ${{ matrix.goarch }}
+        - Build Tags: ${TAGS}
+        
+        ## Installation
+        1. Download the appropriate binary
+        2. Make it executable (for Unix-like systems)
+        3. Run or install as needed
+        
+        ## Links
+        - Project Repository: https://github.com/SagerNet/sing-box
+        - Documentation: https://sing-box.sagernet.org
+        EOF
+
+    - name: Create Archive
+      working-directory: dist
+      run: |
+        OUTPUT_NAME="sing-box_${{ steps.get_version.outputs.VERSION }}_${{ matrix.goos }}_${{ matrix.goarch }}"
+        
+        if [[ "${{ matrix.goos }}" == "windows" ]]; then
+          zip -r "${OUTPUT_NAME}.zip" "${OUTPUT_NAME}"
+        else
+          tar -czvf "${OUTPUT_NAME}.tar.gz" "${OUTPUT_NAME}"
+        fi
+
+    - name: Generate Checksums
+      working-directory: dist
+      run: |
+        OUTPUT_NAME="sing-box_${{ steps.get_version.outputs.VERSION }}_${{ matrix.goos }}_${{ matrix.goarch }}"
+        sha256sum "${OUTPUT_NAME}.tar.gz" > "${OUTPUT_NAME}.sha256sum"
+
+    - name: Upload Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: sing-box-${{ matrix.goos }}-${{ matrix.goarch }}
+        path: |
+          dist/*.tar.gz
+          dist/*.zip
+          dist/*.sha256sum
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+    - name: Download Artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: artifacts
+        merge-multiple: true
+
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v2
+      with:
+        files: |
+          artifacts/*.tar.gz
+          artifacts/*.zip
+          artifacts/*.sha256sum
