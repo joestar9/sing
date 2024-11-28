@@ -1,156 +1,114 @@
-name: Build Sing-Box
-
-on:
-  workflow_dispatch:
-  push:
-    tags:
-      - 'v*'
-  pull_request:
-    branches:
-      - main
+name: build sing-box
 
 permissions:
   contents: write
+  discussions: write
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 0 * * *"
 
 jobs:
-  build:
-    name: Build Sing-Box
+  check-tag:
     runs-on: ubuntu-latest
+    outputs:
+      tag-exists: ${{ steps.check-tag.outputs.exists }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          repository: SagerNet/sing-box
+          ref: main-next
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ^1.23
+      - name: Get Version
+        run: |
+          VERSION=$(CGO_ENABLED=0 GOOS=$(go env GOHOSTOS) GOARCH=$(go env GOHOSTARCH) go run ./cmd/internal/read_tag)
+          echo "VERSION: $VERSION"
+          echo "TAG_NAME=$VERSION" >> $GITHUB_ENV
+          echo "RELEASE_NAME=$VERSION" >> $GITHUB_ENV
+      - uses: mukunku/tag-exists-action@v1.6.0
+        id: check-tag
+        with:
+          tag: ${{ env.TAG_NAME }}
+      - name: Get Output
+        run: |
+          echo "tag-exists=${{ steps.check-tag.outputs.exists }}"
+
+  cross:
+    if: needs.check-tag.outputs.tag-exists == 'false'
+    needs: check-tag
     strategy:
+      fail-fast: false
       matrix:
         include:
-          # Linux
-          - goos: linux
+          # linux
+          - name: linux-amd64
+            goos: linux
             goarch: amd64
-          - goos: linux
-            goarch: arm64
-          - goos: linux
-            goarch: arm
-            goarm: 7
-          - goos: linux
-            goarch: mips64
-          - goos: linux
-            goarch: mips64le
-          
-          # macOS
-          - goos: darwin
+            goamd64: v1
+          - name: linux-amd64-v3
+            goos: linux
             goarch: amd64
-          - goos: darwin
-            goarch: arm64
-          
-          # Windows
-          - goos: windows
-            goarch: amd64
-          - goos: windows
-            goarch: arm64
-          
-          # BSD
-          - goos: freebsd
-            goarch: amd64
-          - goos: openbsd
-            goarch: amd64
-
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
-
-    - name: Set up Go
-      uses: actions/setup-go@v5
-      with:
-        go-version: stable
-        cache: false
-
-    - name: Get version
-      id: get_version
-      run: |
-        VERSION=$(git describe --tags --always)
-        echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
-
-    - name: Build
-      env:
-        GOOS: ${{ matrix.goos }}
-        GOARCH: ${{ matrix.goarch }}
-        GOARM: ${{ matrix.goarm }}
-      run: |
-        TAGS="with_quic,with_wireguard,with_ech,with_utls,with_clash_api,with_gvisor,with_shadowsocksr,with_shadowtls,with_v2ray_api,with_acme,with_reality_server,with_reality_client,with_dhcp,with_grpc"
-        
-        # Prepare output directory
-        OUTPUT_NAME="sing-box_${{ steps.get_version.outputs.VERSION }}_${{ matrix.goos }}_${{ matrix.goarch }}"
-        mkdir -p "dist/${OUTPUT_NAME}"
-        
-        # Set output filename (with .exe for Windows)
-        OUTPUT_FILE="sing-box$([[ "${{ matrix.goos }}" == "windows" ]] && echo .exe || echo '')"
-        
-        # Build command
-        go build -v \
-          -o "dist/${OUTPUT_NAME}/${OUTPUT_FILE}" \
-          -trimpath \
-          -tags "${TAGS}" \
-          -ldflags "-X 'github.com/sagernet/sing-box/constant.Version=${{ steps.get_version.outputs.VERSION }}' -s -w" \
-          ./cmd/sing-box
-        
-        # Create README
-        cat > "dist/${OUTPUT_NAME}/README.md" << EOF
-        # Sing-Box ${{ steps.get_version.outputs.VERSION }}
-        
-        ## Build Information
-        - OS: ${{ matrix.goos }}
-        - Architecture: ${{ matrix.goarch }}
-        - Build Tags: ${TAGS}
-        
-        ## Installation
-        1. Download the appropriate binary
-        2. Make it executable (for Unix-like systems)
-        3. Run or install as needed
-        
-        ## Links
-        - Project Repository: https://github.com/SagerNet/sing-box
-        - Documentation: https://sing-box.sagernet.org
-        EOF
-
-    - name: Create Archive
-      working-directory: dist
-      run: |
-        OUTPUT_NAME="sing-box_${{ steps.get_version.outputs.VERSION }}_${{ matrix.goos }}_${{ matrix.goarch }}"
-        
-        if [[ "${{ matrix.goos }}" == "windows" ]]; then
-          zip -r "${OUTPUT_NAME}.zip" "${OUTPUT_NAME}"
-        else
-          tar -czvf "${OUTPUT_NAME}.tar.gz" "${OUTPUT_NAME}"
-        fi
-
-    - name: Generate Checksums
-      working-directory: dist
-      run: |
-        OUTPUT_NAME="sing-box_${{ steps.get_version.outputs.VERSION }}_${{ matrix.goos }}_${{ matrix.goarch }}"
-        sha256sum "${OUTPUT_NAME}.tar.gz" > "${OUTPUT_NAME}.sha256sum"
-
-    - name: Upload Artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: sing-box-${{ matrix.goos }}-${{ matrix.goarch }}
-        path: |
-          dist/*.tar.gz
-          dist/*.zip
-          dist/*.sha256sum
-
-  release:
-    needs: build
+            goamd64: v3
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
+    env:
+      GOOS: ${{ matrix.goos }}
+      GOARCH: ${{ matrix.goarch }}
+      GOAMD64: ${{ matrix.goamd64 }}
+      GOARM: ${{ matrix.goarm }}
+      CGO_ENABLED: 0
+      TAGS: with_grpc,with_v2ray_api
     steps:
-    - name: Download Artifacts
-      uses: actions/download-artifact@v4
-      with:
-        path: artifacts
-        merge-multiple: true
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          repository: SagerNet/sing-box
+          ref: main-next
 
-    - name: Create GitHub Release
-      uses: softprops/action-gh-release@v2
-      with:
-        files: |
-          artifacts/*.tar.gz
-          artifacts/*.zip
-          artifacts/*.sha256sum
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ^1.23
+
+      - name: Get Version
+        run: |
+          VERSION=$(CGO_ENABLED=0 GOOS=$(go env GOHOSTOS) GOARCH=$(go env GOHOSTARCH) go run ./cmd/internal/read_tag)
+          echo "VERSION: $VERSION"
+          echo "TAG_NAME=$VERSION" >> $GITHUB_ENV
+          echo "RELEASE_NAME=$VERSION" >> $GITHUB_ENV
+
+      - name: Build
+        id: build
+        run: make
+
+      - name: Test
+        run: |
+          echo ${{ contains(matrix.name, 'windows') }}
+          echo ${{ matrix.name }}
+
+      - name: Rename Windows
+        if: ${{ (contains(matrix.name, 'windows')) }}
+        run: mv sing-box* sing-box-${{ matrix.name }}.exe
+      - name: Rename
+        if: ${{ contains(matrix.name, 'linux') }}
+        run: mv sing-box* sing-box-${{ matrix.name }}
+
+      #- name: Upload artifact
+      #  uses: actions/upload-artifact@v3
+      #  with:
+      #    name: sing-box-${{ matrix.name }}
+      #    path: sing-box*
+
+      - name: Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ env.TAG_NAME }}
+          name: ${{ env.RELEASE_NAME }}
+          files: |
+            sing-box*
